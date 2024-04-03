@@ -9,11 +9,12 @@ A simple test of the throughput of atomics on your gpu using webgpu.
 
 Current configuration is 32 atomic adds per thread, launching a total of 15M threads.
 
-| GPU | Max Bandwidth | Ops/s | Bandwidth Utilization | 
+| GPU | Max Bandwidth | Ops/s | Bandwidth Utilization* | 
 |----- | ----- | ----- | ----- |
 |M1 Max | 400 GB/s | 20B | 40% |
 | RTX 4090 | 1008 GB/s | 62B | 49% |
 
+*This is likely not actual global memory utilization, but the utilization that would be required if operations were not collessed prior to global memory.
 
 ----
 
