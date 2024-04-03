@@ -17,12 +17,18 @@ Current configuration is 32 atomic adds per thread, launching a total of 15M thr
 *This is likely not actual global memory utilization, but the utilization that would be required if operations were not collessed prior to global memory.
 
 ----
+### Find out your GPU's performance 
 
-To calculate results for your GPU use the formula:
+1. Go to https://pwhiddy.github.io/webgpu-atomics-benchmark/  
+
+2. Copy the result: `Operations per second`  
+
+3. Calculate results using this formula:
 
 ```python
 operations_per_second = # your result here
 gpu_max_bandwidth = # your gpu max bandwidth (look this up online)
+# 1 read + 1 write for a 4 byte u32
 bandwidth_utilized = ((operations_per_second * 4 * 2) / gpu_max_bandwidth) * 100
 ```
 
