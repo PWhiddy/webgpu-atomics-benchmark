@@ -2,7 +2,7 @@
 
 A simple test of the throughput of atomics on your gpu using webgpu.
 
-*PRs adding results for your GPU or are welcome!*
+*PRs adding results for your GPU are welcome!*
 
 
 ----
