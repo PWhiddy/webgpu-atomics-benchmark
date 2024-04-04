@@ -2,7 +2,7 @@
 
 A simple test of the throughput of atomics on your gpu using webgpu.
 
-While building a very custom GPU memory allocator for my game engine, I've been relying heaviy on atomics. Inspired by the old [CUDA blog post on warp-aggregated atomics](https://developer.nvidia.com/blog/cuda-pro-tip-optimized-filtering-warp-aggregated-atomics/) which demonstrated that compiler magic can counterintuitively make certain GPU atomics extremely fast (faster than a CPU), I've been very curious to know if the same holds true for modern APIs and GPUs. Results indicate that even on non-nvidia systems and high level APIs such as WebGPU, these optimizations are clearly available!
+While building a very custom GPU memory allocator for my game engine, I've been relying heavily on atomics. This was inspired by the old [CUDA blog post on warp-aggregated atomics](https://developer.nvidia.com/blog/cuda-pro-tip-optimized-filtering-warp-aggregated-atomics/) which demonstrated that compiler magic can counterintuitively make certain GPU atomics extremely fast (faster than a CPU). I've been very curious to know if the same holds true for modern APIs and GPUs in general. Results indicate that even on non-nvidia systems and high level APIs such as WebGPU, these optimizations are clearly available!
 
 *PRs adding results for your GPU are welcome!*
 
