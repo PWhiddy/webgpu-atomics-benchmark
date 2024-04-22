@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Compute Dispatch Benchmark</title>
+</head>
+<body>
+    <h2>WebGPU Compute Dispatch Benchmark</h2>
+    <button id="startButton">Run Benchmark</button>
+    <pre id="output"></pre>
+
+    <script type="module">
+        async function initWebGPU() {
+            if (!navigator.gpu) {
+                console.error("WebGPU is not supported. Please make sure you have the latest drivers and are using a compatible browser like Chrome Canary or Edge Canary with WebGPU enabled.");
+                return null;
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            return device;
+        }
+
+        async function createBuffer(device, size, usage) {
+            const buffer = device.createBuffer({
+                size: size,
+                usage: usage,
+                mappedAtCreation: true
+            });
+            new Uint32Array(buffer.getMappedRange()).fill(0);
+            buffer.unmap();
+            return buffer;
+        }
+
+        async function runBenchmark(device) {
+            const shaderCode = `
+                @group(0) @binding(0) var<storage, read_write> buf : array<u32>;
+
+                @compute @workgroup_size(64)
+                fn main(@builtin(global_invocation_id) GlobalInvocationID : vec3<u32>) {
+                    buf[GlobalInvocationID.x] += 1u;
+                }
+            `;
+
+            const module = device.createShaderModule({ code: shaderCode });
+            const buffer = await createBuffer(device, 4 * 1024, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
+            const bindGroupLayout = device.createBindGroupLayout({
+                entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }],
+            });
+            const bindGroup = device.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [{ binding: 0, resource: { buffer } }],
+            });
+            const pipeline = device.createComputePipeline({
+                compute: {
+                    module: module,
+                    entryPoint: 'main',
+                },
+                layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
+            });
+
+            const encoder = device.createCommandEncoder();
+            const pass = encoder.beginComputePass();
+            pass.setPipeline(pipeline);
+            pass.setBindGroup(0, bindGroup);
+            pass.dispatchWorkgroups(Math.ceil(1024 / 64));
+            pass.end();
+            device.queue.submit([encoder.finish()]);
+
+            // Scenario 1: 1000 dispatches in 1 compute pass and one command encoder
+            let start = performance.now();
+            const encoder1 = device.createCommandEncoder();
+            const pass1 = encoder1.beginComputePass();
+            for (let i = 0; i < 1000; i++) {
+                pass1.setPipeline(pipeline);
+                pass1.setBindGroup(0, bindGroup);
+                pass1.dispatchWorkgroups(Math.ceil(1024 / 64));
+            }
+            pass1.end();
+            device.queue.submit([encoder1.finish()]);
+            let end = performance.now();
+            console.log('Scenario 1 (one pass, one encoder): ' + (end - start) + ' ms');
+
+            // Scenario 2: 1000 dispatches, each in one compute pass but one command encoder
+            start = performance.now();
+            const encoder2 = device.createCommandEncoder();
+            for (let i = 0; i < 1000; i++) {
+                const pass2 = encoder2.beginComputePass();
+                pass2.setPipeline(pipeline);
+                pass2.setBindGroup(0, bindGroup);
+                pass2.dispatchWorkgroups(Math.ceil(1024 / 64));
+                pass2.end();
+            }
+            device.queue.submit([encoder2.finish()]);
+            end = performance.now();
+            console.log('Scenario 2 (1000 passes, one encoder): ' + (end - start) + ' ms');
+
+            // Scenario 3: 1000 dispatches each with their own compute pass and command encoders
+            start = performance.now();
+            for (let i = 0; i < 1000; i++) {
+                const encoder3 = device.createCommandEncoder();
+                const pass3 = encoder3.beginComputePass();
+                pass3.setPipeline(pipeline);
+                pass3.setBindGroup(0, bindGroup);
+                pass3.dispatchWorkgroups(Math.ceil(1024 / 64));
+                pass3.end();
+                device.queue.submit([encoder3.finish()]);
+            }
+            end = performance.now();
+            console.log('Scenario 3 (1000 passes, 1000 encoders): ' + (end - start) + ' ms');
+        }
+
+        document.getElementById('startButton').addEventListener('click', async () => {
+            const device = await initWebGPU();
+            if (!device) {
+                document.getElementById('output').textContent = 'WebGPU not available. Check console for details.';
+                return;
+            }
+            await runBenchmark(device);
+        });
+    </script>
+</body>
+</html>
+
