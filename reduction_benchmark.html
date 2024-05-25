@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WebGPU Sum Reduction</title>
+</head>
+<body>
+    <h1>WebGPU Sum Reduction</h1>
+    <button id="run">Run Test</button>
+    <pre id="output"></pre>
+
+    <script type="module">
+        async function initWebGPU() {
+            if (!navigator.gpu) {
+                throw new Error("WebGPU is not supported.");
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            return device;
+        }
+
+        async function runSumReduction(device, inputArray) {
+            const WORKGROUP_SIZE = 256;
+            const inputBuffer = device.createBuffer({
+                size: inputArray.byteLength,
+                usage: GPUBufferUsage.STORAGE,
+                mappedAtCreation: true,
+            });
+            new Int32Array(inputBuffer.getMappedRange()).set(inputArray);
+            inputBuffer.unmap();
+
+            const outputBuffer = device.createBuffer({
+                size: 4,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+                mappedAtCreation: true,
+            });
+            new Int32Array(outputBuffer.getMappedRange()).set([0]);
+            outputBuffer.unmap();
+
+            const shaderCode = `
+            @group(0) @binding(0) var<storage, read> inputBuffer: array<i32>;
+            @group(0) @binding(1) var<storage, read_write> outputBuffer: array<atomic<i32>>;
+
+            const WORKGROUP_SIZE: u32 = 256;
+
+            var<workgroup> shared_memory: array<i32, WORKGROUP_SIZE>;
+
+            @compute
+            @workgroup_size(WORKGROUP_SIZE)
+            fn sum_reduction(@builtin(global_invocation_id) global_id: vec3<u32>, 
+                             @builtin(local_invocation_id) local_id: vec3<u32>, 
+                             @builtin(workgroup_id) group_id: vec3<u32>) {
+
+                let local_index: u32 = local_id.x;
+                let global_index: u32 = global_id.x;
+                shared_memory[local_index] = inputBuffer[global_index];
+                workgroupBarrier();
+
+                var stride: u32 = WORKGROUP_SIZE / 2;
+                while (stride > 0) {
+                    if (local_index < stride) {
+                        shared_memory[local_index] += shared_memory[local_index + stride];
+                    }
+                    stride = stride / 2;
+                    workgroupBarrier();
+                }
+
+                if (local_index == 0) {
+                    atomicAdd(&outputBuffer[0], shared_memory[0]);
+                }
+            }`;
+
+            const shaderModule = device.createShaderModule({ code: shaderCode });
+            const bindGroupLayout = device.createBindGroupLayout({
+                entries: [
+                    { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                    { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }
+                ]
+            });
+            const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+
+            const pipeline = device.createComputePipeline({
+                layout: pipelineLayout,
+                compute: {
+                    module: shaderModule,
+                    entryPoint: "sum_reduction",
+                },
+            });
+
+            const bindGroup = device.createBindGroup({
+                layout: bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: inputBuffer }},
+                    { binding: 1, resource: { buffer: outputBuffer }},
+                ],
+            });
+
+            const commandEncoder = device.createCommandEncoder();
+            const passEncoder = commandEncoder.beginComputePass();
+            passEncoder.setPipeline(pipeline);
+            passEncoder.setBindGroup(0, bindGroup);
+            passEncoder.dispatchWorkgroups(inputArray.length / WORKGROUP_SIZE);
+            passEncoder.end();
+
+            const gpuReadBuffer = device.createBuffer({
+                size: 4,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+
+            commandEncoder.copyBufferToBuffer(outputBuffer, 0, gpuReadBuffer, 0, 4);
+
+            const commands = commandEncoder.finish();
+            device.queue.submit([commands]);
+
+            await gpuReadBuffer.mapAsync(GPUMapMode.READ);
+            const arrayBuffer = gpuReadBuffer.getMappedRange();
+            const result = new Int32Array(arrayBuffer)[0];
+            gpuReadBuffer.unmap();
+
+            return result;
+        }
+
+        function jsSum(inputArray) {
+            return inputArray.reduce((acc, val) => acc + val, 0);
+        }
+
+        document.getElementById('run').addEventListener('click', async () => {
+            const outputElement = document.getElementById('output');
+            outputElement.textContent = 'Running tests...\n';
+
+            const device = await initWebGPU();
+            const inputArray = new Int32Array(1024 * 1024 * 12).fill(1);
+
+            console.time('WebGPU Sum Reduction');
+            const gpuSum = await runSumReduction(device, inputArray);
+            console.timeEnd('WebGPU Sum Reduction');
+
+            console.time('JavaScript Sum');
+            const jsSumResult = jsSum(inputArray);
+            console.timeEnd('JavaScript Sum');
+
+            outputElement.textContent += `WebGPU Sum Reduction Result: ${gpuSum}\n`;
+            outputElement.textContent += `JavaScript Sum Result: ${jsSumResult}\n`;
+        });
+    </script>
+</body>
+</html>
+
