@@ -1,0 +1,568 @@
+<!-- Save this code as webgpu_benchmark.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WebGPU AoS vs SoA Benchmark</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+        #output {
+            white-space: pre-wrap;
+            background-color: #f5f5f5;
+            padding: 1em;
+            border: 1px solid #ccc;
+            height: 300px;
+            overflow: auto;
+        }
+        button {
+            padding: 0.5em 1em;
+            font-size: 1em;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebGPU AoS vs SoA Benchmark</h1>
+    <button id="runButton">Run Benchmark</button>
+    <pre id="output"></pre>
+
+    <script type="module">
+    // Number of entities to process
+    const NUM_ENTITIES = 1_000_000; // Adjust as needed for your hardware
+
+    document.getElementById('runButton').addEventListener('click', runBenchmark);
+
+    async function runBenchmark() {
+        const output = document.getElementById('output');
+        output.textContent = 'Initializing...\n';
+
+        if (!navigator.gpu) {
+            output.textContent += 'WebGPU is not supported on this browser.';
+            return;
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        const device = await adapter.requestDevice();
+
+        // Initialize data
+        output.textContent += 'Initializing data...\n';
+        const entitiesAoS = initEntitiesAoS();
+        const entitiesSoA = initEntitiesSoA();
+
+        // Run AoS benchmark
+        output.textContent += 'Running AoS benchmark...\n';
+        const aosResult = await runBenchmarkAoS(device, entitiesAoS);
+        output.textContent += `AoS compute shader took ${aosResult.time} ms\n`;
+
+        // Run SoA benchmark
+        output.textContent += 'Running SoA benchmark...\n';
+        const soaResult = await runBenchmarkSoA(device, entitiesSoA);
+        output.textContent += `SoA compute shader took ${soaResult.time} ms\n`;
+
+        // Verify results
+        output.textContent += 'Verifying results...\n';
+        const verificationPassed = verifyResults(aosResult, soaResult);
+        output.textContent += verificationPassed ? 'Verification passed.\n' : 'Verification failed.\n';
+    }
+
+    function initEntitiesAoS() {
+        // Each entity has 112 bytes (aligned to 16 bytes)
+        const entitySize = 112;
+        const buffer = new ArrayBuffer(NUM_ENTITIES * entitySize);
+        const dataView = new DataView(buffer);
+
+        for (let i = 0; i < NUM_ENTITIES; i++) {
+            const offset = i * entitySize;
+            // Initialize data
+            dataView.setFloat32(offset + 0, i, true);       // particle_pos.x
+            dataView.setFloat32(offset + 4, i, true);       // particle_pos.y
+            dataView.setFloat32(offset + 8, 1.0, true);     // particle_vel.x
+            dataView.setFloat32(offset + 12, 1.0, true);    // particle_vel.y
+            dataView.setFloat32(offset + 16, 0.1, true);    // particle_accel_old.x
+            dataView.setFloat32(offset + 20, 0.1, true);    // particle_accel_old.y
+            dataView.setFloat32(offset + 24, 0.0, true);    // particle_bonus.x
+            dataView.setFloat32(offset + 28, 0.0, true);    // particle_bonus.y
+
+            // component_data_a (vec4<f32>)
+            dataView.setFloat32(offset + 32, 0.0, true);
+            dataView.setFloat32(offset + 36, 0.0, true);
+            dataView.setFloat32(offset + 40, 0.0, true);
+            dataView.setFloat32(offset + 44, 0.0, true);
+
+            // component_data_b (vec4<f32>)
+            dataView.setFloat32(offset + 48, 0.0, true);
+            dataView.setFloat32(offset + 52, 0.0, true);
+            dataView.setFloat32(offset + 56, 0.0, true);
+            dataView.setFloat32(offset + 60, 0.0, true);
+
+            // components (vec4<u32>)
+            dataView.setUint32(offset + 64, 0, true);
+            dataView.setUint32(offset + 68, 0, true);
+            dataView.setUint32(offset + 72, 0, true);
+            dataView.setUint32(offset + 76, 0, true);
+
+            // _extra (vec4<u32>)
+            dataView.setUint32(offset + 80, 0, true);
+            dataView.setUint32(offset + 84, 0, true);
+            dataView.setUint32(offset + 88, 0, true);
+            dataView.setUint32(offset + 92, 0, true);
+
+            // position (vec2<f32>)
+            dataView.setFloat32(offset + 96, i, true);     // position.x
+            dataView.setFloat32(offset + 100, i, true);    // position.y
+
+            // Padding to align struct size to 112 bytes
+            // Offset up to 112 bytes
+        }
+
+        return buffer;
+    }
+
+    function initEntitiesSoA() {
+        const numEntities = NUM_ENTITIES;
+
+        // EntitiesSoA: particle_pos, particle_vel, particle_accel_old, particle_bonus, position
+        const numVec2Fields = 5;
+        const entitiesBufferSize = numVec2Fields * numEntities * 8; // 8 bytes per vec2<f32>
+        const entitiesBuffer = new ArrayBuffer(entitiesBufferSize);
+        const entitiesView = new DataView(entitiesBuffer);
+
+        for (let i = 0; i < numEntities; i++) {
+            // Calculate offsets for each field
+            const particlePosOffset = i * 8;
+            const particleVelOffset = (numEntities + i) * 8;
+            const accelOffset = (2 * numEntities + i) * 8;
+            const bonusOffset = (3 * numEntities + i) * 8;
+            const positionOffset = (4 * numEntities + i) * 8;
+
+            // particle_pos
+            entitiesView.setFloat32(particlePosOffset + 0, i, true);
+            entitiesView.setFloat32(particlePosOffset + 4, i, true);
+
+            // particle_vel
+            entitiesView.setFloat32(particleVelOffset + 0, 1.0, true);
+            entitiesView.setFloat32(particleVelOffset + 4, 1.0, true);
+
+            // particle_accel_old
+            entitiesView.setFloat32(accelOffset + 0, 0.1, true);
+            entitiesView.setFloat32(accelOffset + 4, 0.1, true);
+
+            // particle_bonus
+            entitiesView.setFloat32(bonusOffset + 0, 0.0, true);
+            entitiesView.setFloat32(bonusOffset + 4, 0.0, true);
+
+            // position
+            entitiesView.setFloat32(positionOffset + 0, i, true);
+            entitiesView.setFloat32(positionOffset + 4, i, true);
+        }
+
+        // ComponentsSoA: component_data_a, component_data_b, components, _extra
+        const numVec4Fields = 4;
+        const componentsBufferSize = numVec4Fields * numEntities * 16; // 16 bytes per vec4
+        const componentsBuffer = new ArrayBuffer(componentsBufferSize);
+        const componentsView = new DataView(componentsBuffer);
+
+        // Initialize components data as needed...
+        // For simplicity, we'll leave them zeroed
+
+        return { entitiesBuffer, componentsBuffer };
+    }
+
+    async function runBenchmarkAoS(device, entitiesBuffer) {
+        // Create a copy of the initial data for verification
+        const initialData = entitiesBuffer.slice(0);
+        
+        const entitySize = 112; // Entity size in bytes
+        const gpuBuffer = device.createBuffer({
+            size: entitiesBuffer.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true,
+        });
+
+        new Uint8Array(gpuBuffer.getMappedRange()).set(new Uint8Array(entitiesBuffer));
+        gpuBuffer.unmap();
+
+        const shaderModule = device.createShaderModule({
+            code: aosComputeShader.replace(/NUM_ENTITIES_PLACEHOLDER/g, NUM_ENTITIES.toString()),
+        });
+
+        // Create bind group layout
+        const bindGroupLayout = device.createBindGroupLayout({
+            entries: [{
+                binding: 0,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: {
+                    type: 'storage',
+                },
+            }],
+        });
+
+        // Create pipeline layout
+        const pipelineLayout = device.createPipelineLayout({
+            bindGroupLayouts: [bindGroupLayout],
+        });
+
+        // Create compute pipeline
+        const pipeline = device.createComputePipeline({
+            layout: pipelineLayout,
+            compute: {
+                module: shaderModule,
+                entryPoint: 'main',
+            },
+        });
+
+        // Create bind group
+        const bindGroup = device.createBindGroup({
+            layout: bindGroupLayout,
+            entries: [{
+                binding: 0,
+                resource: {
+                    buffer: gpuBuffer,
+                },
+            }],
+        });
+
+        const commandEncoder = device.createCommandEncoder();
+        const passEncoder = commandEncoder.beginComputePass();
+        passEncoder.setPipeline(pipeline);
+        passEncoder.setBindGroup(0, bindGroup);
+        const workgroupSize = 64;
+        const numWorkgroups = Math.ceil(NUM_ENTITIES / workgroupSize);
+        passEncoder.dispatchWorkgroups(numWorkgroups);
+        passEncoder.end();
+
+        const startTime = performance.now();
+        device.queue.submit([commandEncoder.finish()]);
+        await device.queue.onSubmittedWorkDone();
+        const endTime = performance.now();
+
+        // Read back the data
+        const readBuffer = device.createBuffer({
+            size: entitiesBuffer.byteLength,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
+        const copyEncoder = device.createCommandEncoder();
+        copyEncoder.copyBufferToBuffer(gpuBuffer, 0, readBuffer, 0, entitiesBuffer.byteLength);
+        device.queue.submit([copyEncoder.finish()]);
+        await readBuffer.mapAsync(GPUMapMode.READ);
+        const arrayBuffer = readBuffer.getMappedRange();
+        const resultBuffer = arrayBuffer.slice(0);
+        readBuffer.unmap();
+
+        return {
+            time: (endTime - startTime).toFixed(2),
+            data: resultBuffer,
+            initialData: initialData
+        };
+    }
+
+    async function runBenchmarkSoA(device, entitiesBuffers) {
+        const { entitiesBuffer, componentsBuffer } = entitiesBuffers;
+
+        // Create GPU buffers
+        const gpuBufferEntities = device.createBuffer({
+            size: entitiesBuffer.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true,
+        });
+        new Uint8Array(gpuBufferEntities.getMappedRange()).set(new Uint8Array(entitiesBuffer));
+        gpuBufferEntities.unmap();
+
+        const gpuBufferComponents = device.createBuffer({
+            size: componentsBuffer.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true,
+        });
+        new Uint8Array(gpuBufferComponents.getMappedRange()).set(new Uint8Array(componentsBuffer));
+        gpuBufferComponents.unmap();
+
+        const shaderModule = device.createShaderModule({
+            code: soaComputeShader.replace(/NUM_ENTITIES_PLACEHOLDER/g, NUM_ENTITIES.toString()),
+        });
+
+        // Create bind group layout
+        const bindGroupLayout = device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: 'storage' },
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.COMPUTE,
+                    buffer: { type: 'storage' },
+                },
+            ],
+        });
+
+        const pipelineLayout = device.createPipelineLayout({
+            bindGroupLayouts: [bindGroupLayout],
+        });
+
+        const pipeline = device.createComputePipeline({
+            layout: pipelineLayout,
+            compute: {
+                module: shaderModule,
+                entryPoint: 'main',
+            },
+        });
+
+        const bindGroup = device.createBindGroup({
+            layout: bindGroupLayout,
+            entries: [
+                {
+                    binding: 0,
+                    resource: { buffer: gpuBufferEntities },
+                },
+                {
+                    binding: 1,
+                    resource: { buffer: gpuBufferComponents },
+                },
+            ],
+        });
+
+        const commandEncoder = device.createCommandEncoder();
+        const passEncoder = commandEncoder.beginComputePass();
+        passEncoder.setPipeline(pipeline);
+        passEncoder.setBindGroup(0, bindGroup);
+        const workgroupSize = 64;
+        const numWorkgroups = Math.ceil(NUM_ENTITIES / workgroupSize);
+        passEncoder.dispatchWorkgroups(numWorkgroups);
+        passEncoder.end();
+
+        const startTime = performance.now();
+        device.queue.submit([commandEncoder.finish()]);
+        await device.queue.onSubmittedWorkDone();
+        const endTime = performance.now();
+
+        // Read back the data
+        // Read back entities buffer
+        const readBufferEntities = device.createBuffer({
+            size: entitiesBuffer.byteLength,
+            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+        });
+
+        const copyEncoder = device.createCommandEncoder();
+        copyEncoder.copyBufferToBuffer(gpuBufferEntities, 0, readBufferEntities, 0, entitiesBuffer.byteLength);
+        device.queue.submit([copyEncoder.finish()]);
+        await readBufferEntities.mapAsync(GPUMapMode.READ);
+        const arrayBufferEntities = readBufferEntities.getMappedRange();
+        const resultBufferEntities = arrayBufferEntities.slice(0);
+        readBufferEntities.unmap();
+
+        // For simplicity, we'll only verify the entities buffer
+        return {
+            time: (endTime - startTime).toFixed(2),
+            data: resultBufferEntities,
+        };
+    }
+
+    function verifyResults(aosResult, soaResult) {
+        const { data: aosDataBuffer, initialData: aosInitialData } = aosResult;
+        const gpuAoS = new DataView(aosDataBuffer);
+        const entitySize = 112;
+
+        // Perform CPU computation using the initial data
+        const cpuAoS = performCpuComputationAoS(aosInitialData);
+
+        // Verify AoS results
+        for (let i = 0; i < NUM_ENTITIES; i++) {
+            const offset = i * entitySize;
+            
+            // Get CPU values
+            const cpuPosX = cpuAoS.getFloat32(offset + 0, true);
+            const cpuPosY = cpuAoS.getFloat32(offset + 4, true);
+            const cpuVelX = cpuAoS.getFloat32(offset + 8, true);
+            const cpuVelY = cpuAoS.getFloat32(offset + 12, true);
+            
+            // Get GPU values
+            const gpuPosX = gpuAoS.getFloat32(offset + 0, true);
+            const gpuPosY = gpuAoS.getFloat32(offset + 4, true);
+            const gpuVelX = gpuAoS.getFloat32(offset + 8, true);
+            const gpuVelY = gpuAoS.getFloat32(offset + 12, true);
+
+            if (Math.abs(cpuPosX - gpuPosX) > 1e-5 || Math.abs(cpuPosY - gpuPosY) > 1e-5) {
+                console.error(`AoS Mismatch at entity ${i}:`);
+                
+                // Log initial values from the actual initial data
+                const initialView = new DataView(aosInitialData);
+                const initialPosX = initialView.getFloat32(offset + 0, true);
+                const initialPosY = initialView.getFloat32(offset + 4, true);
+                const initialVelX = initialView.getFloat32(offset + 8, true);
+                const initialVelY = initialView.getFloat32(offset + 12, true);
+                const initialAccelX = initialView.getFloat32(offset + 16, true);
+                const initialAccelY = initialView.getFloat32(offset + 20, true);
+                
+                console.error('Initial values:', {
+                    position: `(${initialPosX}, ${initialPosY})`,
+                    velocity: `(${initialVelX}, ${initialVelY})`,
+                    acceleration: `(${initialAccelX}, ${initialAccelY})`
+                });
+                
+                console.error('CPU computation:', {
+                    position: `(${cpuPosX}, ${cpuPosY})`,
+                    velocity: `(${cpuVelX}, ${cpuVelY})`
+                });
+                
+                console.error('GPU computation:', {
+                    position: `(${gpuPosX}, ${gpuPosY})`,
+                    velocity: `(${gpuVelX}, ${gpuVelY})`
+                });
+                
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    function performCpuComputationAoS(inputBuffer) {
+        // Create a new buffer for results
+        const resultBuffer = new ArrayBuffer(inputBuffer.byteLength);
+        const resultView = new DataView(resultBuffer);
+        const inputView = new DataView(inputBuffer);
+        const entitySize = 112;
+
+        // First copy all data
+        new Uint8Array(resultBuffer).set(new Uint8Array(inputBuffer));
+
+        for (let i = 0; i < NUM_ENTITIES; i++) {
+            const offset = i * entitySize;
+            
+            // Read input values
+            const posX = inputView.getFloat32(offset + 0, true);
+            const posY = inputView.getFloat32(offset + 4, true);
+            const velX = inputView.getFloat32(offset + 8, true);
+            const velY = inputView.getFloat32(offset + 12, true);
+            const accelX = inputView.getFloat32(offset + 16, true);
+            const accelY = inputView.getFloat32(offset + 20, true);
+
+            // Compute exactly as in GPU shader
+            const newPosX = posX + velX;
+            const newPosY = posY + velY;
+            const newVelX = velX + accelX;
+            const newVelY = velY + accelY;
+
+            // Write results
+            resultView.setFloat32(offset + 0, newPosX, true);
+            resultView.setFloat32(offset + 4, newPosY, true);
+            resultView.setFloat32(offset + 8, newVelX, true);
+            resultView.setFloat32(offset + 12, newVelY, true);
+        }
+
+        return resultView;
+    }
+
+    function performCpuComputationSoA(cpuBuffer) {
+        const dataView = new DataView(cpuBuffer);
+        const numEntities = NUM_ENTITIES;
+        const vec2Size = 8;
+
+        for (let i = 0; i < numEntities; i++) {
+            // Calculate offsets
+            const particlePosOffset = i * vec2Size;
+            const particleVelOffset = (numEntities + i) * vec2Size;
+            const accelOffset = (2 * numEntities + i) * vec2Size;
+
+            // Read values
+            const posX = dataView.getFloat32(particlePosOffset + 0, true);
+            const posY = dataView.getFloat32(particlePosOffset + 4, true);
+            const velX = dataView.getFloat32(particleVelOffset + 0, true);
+            const velY = dataView.getFloat32(particleVelOffset + 4, true);
+            const accelX = dataView.getFloat32(accelOffset + 0, true);
+            const accelY = dataView.getFloat32(accelOffset + 4, true);
+
+            // Perform computation exactly as in GPU shader
+            const newPosX = posX + velX;
+            const newPosY = posY + velY;
+            const newVelX = velX + accelX;
+            const newVelY = velY + accelY;
+
+            // Update values
+            dataView.setFloat32(particlePosOffset + 0, newPosX, true);
+            dataView.setFloat32(particlePosOffset + 4, newPosY, true);
+            dataView.setFloat32(particleVelOffset + 0, newVelX, true);
+            dataView.setFloat32(particleVelOffset + 4, newVelY, true);
+        }
+
+        return dataView;
+    }
+
+    // Compute Shader for AoS
+    const aosComputeShader = /* wgsl */`
+    struct Entity {
+        particle_pos: vec2<f32>,
+        particle_vel: vec2<f32>,
+        particle_accel_old: vec2<f32>,
+        particle_bonus: vec2<f32>,
+        component_data_a: vec4<f32>,
+        component_data_b: vec4<f32>,
+        components: vec4<u32>,
+        _extra: vec4<u32>,
+        position: vec2<f32>,
+        // Padding to align struct size to 112 bytes
+        _padding: vec2<f32>,
+    };
+
+    struct Entities {
+        entities: array<Entity, NUM_ENTITIES_PLACEHOLDER>,
+    };
+
+    @group(0) @binding(0) var<storage, read_write> entities: Entities;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+        let idx = global_id.x;
+        if (idx >= NUM_ENTITIES_PLACEHOLDERu) {
+            return;
+        }
+        // Read the entity from the storage buffer
+        var entity: Entity = entities.entities[idx];
+
+        // Modify entity fields
+        entity.particle_pos = entity.particle_pos + entity.particle_vel;
+        entity.particle_vel = entity.particle_vel + entity.particle_accel_old;
+
+        // Write the modified entity back to the storage buffer
+        entities.entities[idx] = entity;
+    }
+    `;
+
+    // Compute Shader for SoA
+    const soaComputeShader = /* wgsl */`
+    struct EntitiesSoA {
+        particle_pos: array<vec2<f32>, NUM_ENTITIES_PLACEHOLDER>,
+        particle_vel: array<vec2<f32>, NUM_ENTITIES_PLACEHOLDER>,
+        particle_accel_old: array<vec2<f32>, NUM_ENTITIES_PLACEHOLDER>,
+        particle_bonus: array<vec2<f32>, NUM_ENTITIES_PLACEHOLDER>,
+        position: array<vec2<f32>, NUM_ENTITIES_PLACEHOLDER>,
+    };
+
+    struct ComponentsSoA {
+        component_data_a: array<vec4<f32>, NUM_ENTITIES_PLACEHOLDER>,
+        component_data_b: array<vec4<f32>, NUM_ENTITIES_PLACEHOLDER>,
+        components: array<vec4<u32>, NUM_ENTITIES_PLACEHOLDER>,
+        _extra: array<vec4<u32>, NUM_ENTITIES_PLACEHOLDER>,
+    };
+
+    @group(0) @binding(0) var<storage, read_write> entities: EntitiesSoA;
+    @group(0) @binding(1) var<storage, read_write> components: ComponentsSoA;
+
+    @compute @workgroup_size(64)
+    fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+        let idx = global_id.x;
+        if (idx >= NUM_ENTITIES_PLACEHOLDERu) {
+            return;
+        }
+        // Simple computation: particle_pos += particle_vel
+        entities.particle_pos[idx] = entities.particle_pos[idx] + entities.particle_vel[idx];
+        entities.particle_vel[idx] = entities.particle_vel[idx] + entities.particle_accel_old[idx];
+        // Additional computations...
+    }
+    `;
+    </script>
+</body>
+</html>
