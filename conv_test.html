@@ -1,0 +1,255 @@
+<!-- coded up thoughtfully by jippity (after me asking rudely 300 times) -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Convolution Benchmark - Scalable Version</title>
+</head>
+<body>
+    <h1>3x3 Convolution Benchmark (NCHW vs NHWC) - Scalable</h1>
+    <pre id="output"></pre>
+    <script type="module">
+        async function setupWebGPU() {
+            if (!navigator.gpu) throw new Error("WebGPU not supported");
+            const adapter = await navigator.gpu.requestAdapter();
+            const device = await adapter.requestDevice();
+            return device;
+        }
+
+        function cpuConvolution(input, width, height, channels, filter) {
+            const output = new Float32Array(input.length);
+            for (let c = 0; c < channels; c++) {
+                for (let y = 1; y < height - 1; y++) {
+                    for (let x = 1; x < width - 1; x++) {
+                        let sum = 0;
+                        for (let fy = -1; fy <= 1; fy++) {
+                            for (let fx = -1; fx <= 1; fx++) {
+                                const iy = y + fy, ix = x + fx;
+                                const index = (iy * width + ix) * channels + c;
+                                sum += input[index] * filter[(fy + 1) * 3 + (fx + 1)];
+                            }
+                        }
+                        output[(y * width + x) * channels + c] = sum;
+                    }
+                }
+            }
+            console.log("CPU Output:", output);
+            return output;
+        }
+
+        function toNCHW(input, width, height, channels) {
+            const nchwData = new Float32Array(input.length);
+            let idx = 0;
+            for (let c = 0; c < channels; c++) {
+                for (let y = 0; y < height; y++) {
+                    for (let x = 0; x < width; x++) {
+                        nchwData[idx++] = input[(y * width + x) * channels + c];
+                    }
+                }
+            }
+            console.log("Transformed Input (NCHW):", nchwData);
+            return nchwData;
+        }
+
+        function toNHWC(input, width, height, channels) {
+            const nhwcData = new Float32Array(input.length);
+            let idx = 0;
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    for (let c = 0; c < channels; c++) {
+                        nhwcData[idx++] = input[(y * width + x) * channels + c];
+                    }
+                }
+            }
+            console.log("Transformed Input (NHWC):", nhwcData);
+            return nhwcData;
+        }
+
+        function fromNCHWtoNHWC(input, width, height, channels) {
+            const nhwcData = new Float32Array(input.length);
+            let idx = 0;
+            for (let c = 0; c < channels; c++) {
+                for (let y = 0; y < height; y++) {
+                    for (let x = 0; x < width; x++) {
+                        nhwcData[(y * width + x) * channels + c] = input[idx++];
+                    }
+                }
+            }
+            console.log("Converted NCHW to NHWC Output:", nhwcData);
+            return nhwcData;
+        }
+
+        async function runBenchmark() {
+            const device = await setupWebGPU();
+
+            // Define the identity filter
+            const filter = new Float32Array([
+                0.111, 0.111, 0.111,
+                0.111, 0.111, 0.111,
+                0.111, 0.111, 0.111,
+            ]);
+
+            // Define larger image dimensions
+            const width = 1024, height = 1024, channels = 32;
+            const input = new Float32Array(width * height * channels).map((_, i) => Math.random());
+
+            console.log("Original Input (NHWC):", input);
+
+            console.time("CPU Convolution");
+            const cpuOutput = cpuConvolution(input, width, height, channels, filter);
+            console.timeEnd("CPU Convolution");
+
+            const nchwInput = toNCHW(input, width, height, channels);
+            const nhwcInput = toNHWC(input, width, height, channels);
+
+            const nchwShaderCode = `
+                @group(0) @binding(0) var<storage, read> inputBuffer: array<f32>;
+                @group(0) @binding(1) var<storage, read_write> outputBuffer: array<f32>;
+                @group(0) @binding(2) var<storage, read> kern: array<f32, 9>;
+                @group(0) @binding(3) var<uniform> dims: vec3<i32>;
+
+                fn index(x: i32, y: i32, c: i32) -> i32 {
+                    return (c * dims.y * dims.x + y * dims.x + x);
+                }
+
+                @compute @workgroup_size(8, 8)
+                fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                    let x = i32(gid.x);
+                    let y = i32(gid.y);
+                    let c = i32(gid.z);
+                    if (x > 0 && x < dims.x - 1 && y > 0 && y < dims.y - 1) {
+                        var sum: f32 = 0.0;
+                        for (var fy = -1; fy <= 1; fy = fy + 1) {
+                            for (var fx = -1; fx <= 1; fx = fx + 1) {
+                                let inputIdx = index(x + fx, y + fy, c);
+                                let kernelValue = kern[(fy + 1) * 3 + (fx + 1)];
+                                sum = sum + inputBuffer[inputIdx] * kernelValue;
+                            }
+                        }
+                        let outputIdx = index(x, y, c);
+                        outputBuffer[outputIdx] = sum;
+                    }
+                }
+            `;
+
+            const nhwcShaderCode = `
+                @group(0) @binding(0) var<storage, read> inputBuffer: array<f32>;
+                @group(0) @binding(1) var<storage, read_write> outputBuffer: array<f32>;
+                @group(0) @binding(2) var<storage, read> kern: array<f32, 9>;
+                @group(0) @binding(3) var<uniform> dims: vec3<i32>;
+
+                fn index(x: i32, y: i32, c: i32) -> i32 {
+                    return (y * dims.x * dims.z + x * dims.z + c);
+                }
+
+                @compute @workgroup_size(8, 8)
+                fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                    let x = i32(gid.x);
+                    let y = i32(gid.y);
+                    let c = i32(gid.z);
+                    if (x > 0 && x < dims.x - 1 && y > 0 && y < dims.y - 1) {
+                        var sum: f32 = 0.0;
+                        for (var fy = -1; fy <= 1; fy = fy + 1) {
+                            for (var fx = -1; fx <= 1; fx = fx + 1) {
+                                let inputIdx = index(x + fx, y + fy, c);
+                                let kernelValue = kern[(fy + 1) * 3 + (fx + 1)];
+                                sum = sum + inputBuffer[inputIdx] * kernelValue;
+                            }
+                        }
+                        let outputIdx = index(x, y, c);
+                        outputBuffer[outputIdx] = sum;
+                    }
+                }
+            `;
+
+            async function runGPUConvolution(shaderCode, inputData, layout) {
+                const shaderModule = device.createShaderModule({ code: shaderCode });
+                const pipeline = device.createComputePipeline({
+                    layout: "auto",
+                    compute: { module: shaderModule, entryPoint: "main" },
+                });
+
+                const inputBuffer = device.createBuffer({
+                    size: inputData.byteLength,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+                const outputBuffer = device.createBuffer({
+                    size: inputData.byteLength,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+                });
+                const filterBuffer = device.createBuffer({
+                    size: filter.byteLength,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                });
+                const dimsBuffer = device.createBuffer({
+                    size: 12,
+                    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                });
+
+                device.queue.writeBuffer(inputBuffer, 0, inputData);
+                device.queue.writeBuffer(filterBuffer, 0, filter);
+                device.queue.writeBuffer(dimsBuffer, 0, new Int32Array([width, height, channels]));
+
+                const bindGroup = device.createBindGroup({
+                    layout: pipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: inputBuffer } },
+                        { binding: 1, resource: { buffer: outputBuffer } },
+                        { binding: 2, resource: { buffer: filterBuffer } },
+                        { binding: 3, resource: { buffer: dimsBuffer } },
+                    ],
+                });
+
+                const workgroupsX = Math.ceil(width / 8);
+                const workgroupsY = Math.ceil(height / 8);
+
+                const computeEncoder = device.createCommandEncoder();
+                const passEncoder = computeEncoder.beginComputePass();
+                passEncoder.setPipeline(pipeline);
+                passEncoder.setBindGroup(0, bindGroup);
+
+                passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY, channels);
+                passEncoder.end();
+                console.time(`GPU Convolution (${layout})`);
+                await device.queue.submit([computeEncoder.finish()]);
+                await device.queue.onSubmittedWorkDone();
+                console.timeEnd(`GPU Convolution (${layout})`);
+
+                const copyEncoder = device.createCommandEncoder();
+                const gpuReadBuffer = device.createBuffer({
+                    size: inputData.byteLength,
+                    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+                });
+                copyEncoder.copyBufferToBuffer(outputBuffer, 0, gpuReadBuffer, 0, inputData.byteLength);
+                device.queue.submit([copyEncoder.finish()]);
+
+                await gpuReadBuffer.mapAsync(GPUMapMode.READ);
+                const gpuOutput = new Float32Array(gpuReadBuffer.getMappedRange().slice());
+                gpuReadBuffer.unmap();
+
+                console.log(`GPU Output (${layout}):`, gpuOutput);
+                return gpuOutput;
+            }
+
+            const nchwOutputRaw = await runGPUConvolution(nchwShaderCode, nchwInput, "NCHW");
+            const nhwcOutputRaw = await runGPUConvolution(nhwcShaderCode, nhwcInput, "NHWC");
+
+            const nchwOutput = fromNCHWtoNHWC(nchwOutputRaw, width, height, channels);
+            const nhwcOutput = nhwcOutputRaw;
+
+            let nchwMatch = true, nhwcMatch = true;
+            for (let i = 0; i < cpuOutput.length; i++) {
+                if (Math.abs(cpuOutput[i] - nchwOutput[i]) > 0.001) nchwMatch = false;
+                if (Math.abs(cpuOutput[i] - nhwcOutput[i]) > 0.001) nhwcMatch = false;
+                if (!nchwMatch && !nhwcMatch) break;
+            }
+
+            document.getElementById("output").textContent = 
+                `GPU NCHW matches CPU: ${nchwMatch}\n` +
+                `GPU NHWC matches CPU: ${nhwcMatch}`;
+        }
+
+        runBenchmark().catch(console.error);
+    </script>
+</body>
+</html>
